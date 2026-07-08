@@ -44,6 +44,18 @@ def send_message(chat_id: int, text: str) -> None:
             _post("sendMessage", {"chat_id": chat_id, "text": chunk})
 
 
+def send_html(chat_id: int, html: str) -> None:
+    """Invia un messaggio in formato HTML (per link cliccabili affidabili)."""
+    for start in range(0, len(html), MAX_MESSAGE_LEN):
+        chunk = html[start:start + MAX_MESSAGE_LEN]
+        _post("sendMessage", {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        })
+
+
 def send_chat_action(chat_id: int, action: str = "typing") -> None:
     try:
         requests.post(
