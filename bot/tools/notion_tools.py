@@ -81,6 +81,30 @@ def _match_option(value: str, options: list) -> str | None:
     return None
 
 
+def _find_prop_name(db: dict, candidate_names: set, wanted_types: set):
+    """Trova il nome reale di una proprietà del database per nome+tipo."""
+    for pname, meta in db["props"].items():
+        if pname.lower() in candidate_names and meta["type"] in wanted_types:
+            return pname, meta
+    return None, None
+
+
+def _read_prop_value(meta: dict):
+    """Estrae il valore leggibile di una proprietà da una pagina restituita da query."""
+    t = meta["type"]
+    if t == "title":
+        return "".join(x.get("plain_text", "") for x in meta["title"])
+    if t == "rich_text":
+        return "".join(x.get("plain_text", "") for x in meta["rich_text"])
+    if t in ("status", "select"):
+        return meta[t]["name"] if meta[t] else None
+    if t == "date":
+        return meta["date"]["start"] if meta["date"] else None
+    if t == "url":
+        return meta.get("url")
+    return None
+
+
 def list_databases() -> str:
     """Elenca i database disponibili con i campi che si possono compilare."""
     dbs = _discover_databases()
@@ -111,24 +135,19 @@ def create_entry(database: str, title: str, status: str = "", priority: str = ""
         db["title_prop"]: {"title": [{"type": "text", "text": {"content": title}}]}
     }
     avvisi = []
+    find_prop = lambda names, types: _find_prop_name(db, names, types)
 
-    # Mappa i parametri "logici" ai campi reali del database (per nome, case-insensitive).
-    def find_prop(candidate_names, wanted_types):
-        for pname, meta in db["props"].items():
-            if pname.lower() in candidate_names and meta["type"] in wanted_types:
-                return pname, meta
-        return None, None
-
-    if status:
-        pname, meta = find_prop({"status"}, {"status", "select"})
-        if pname:
-            match = _match_option(status, meta.get("options", []))
-            if match:
-                properties[pname] = {meta["type"]: {"name": match}}
-            else:
-                avvisi.append(f"stato '{status}' non valido (opzioni: {meta.get('options')})")
-        else:
-            avvisi.append("questo database non ha un campo Stato")
+    # Stato: se non specificato, per i database che ce l'hanno prova "Next Action".
+    status_pname, status_meta = find_prop({"status"}, {"status", "select"})
+    if status_pname:
+        wanted = status or "Next Action"
+        match = _match_option(wanted, status_meta.get("options", []))
+        if match:
+            properties[status_pname] = {status_meta["type"]: {"name": match}}
+        elif status:
+            avvisi.append(f"stato '{status}' non valido (opzioni: {status_meta.get('options')})")
+    elif status:
+        avvisi.append("questo database non ha un campo Stato")
 
     if priority:
         pname, meta = find_prop({"priority", "priorità"}, {"select", "status"})
@@ -164,6 +183,61 @@ def create_entry(database: str, title: str, status: str = "", priority: str = ""
     if avvisi:
         msg += " (nota: " + "; ".join(avvisi) + ")"
     return msg
+
+
+def query_database(database: str, due_before: str = "", due_after: str = "",
+                   status: str = "", exclude_completed: bool = True, limit: int = 25) -> str:
+    """Interroga un database filtrando per scadenza (Due Date) e/o stato."""
+    dbs = _discover_databases()
+    db = dbs.get(database.strip().lower())
+    if db is None:
+        disponibili = ", ".join(d["name"] for d in dbs.values())
+        return f"Database '{database}' non trovato. Disponibili: {disponibili}"
+
+    date_pname, _ = _find_prop_name(db, {"due date", "due", "scadenza", "date"}, {"date"})
+    status_pname, status_meta = _find_prop_name(db, {"status"}, {"status", "select"})
+
+    conditions = []
+    if (due_before or due_after) and date_pname:
+        date_filter = {}
+        if due_after:
+            date_filter["on_or_after"] = due_after
+        if due_before:
+            date_filter["on_or_before"] = due_before
+        conditions.append({"property": date_pname, "date": date_filter})
+    if status and status_pname:
+        match = _match_option(status, status_meta.get("options", [])) or status
+        conditions.append({"property": status_pname, status_meta["type"]: {"equals": match}})
+    elif exclude_completed and status_pname and "Completed" in status_meta.get("options", []):
+        conditions.append({"property": status_pname, status_meta["type"]: {"does_not_equal": "Completed"}})
+
+    body = {"page_size": min(limit, 100)}
+    if len(conditions) == 1:
+        body["filter"] = conditions[0]
+    elif len(conditions) > 1:
+        body["filter"] = {"and": conditions}
+    if date_pname:
+        body["sorts"] = [{"property": date_pname, "direction": "ascending"}]
+
+    results = _client().request(
+        path=f"data_sources/{db['data_source_id']}/query", method="POST", body=body
+    ).get("results", [])
+    if not results:
+        return f"Nessuna voce trovata nel database {db['name']} con questi criteri."
+
+    prio_pname, _ = _find_prop_name(db, {"priority", "priorità"}, {"select", "status"})
+    out = []
+    for p in results:
+        props = p.get("properties", {})
+        row = {"titolo": _read_prop_value(props.get(db["title_prop"], {"type": "title", "title": []}))}
+        if status_pname and status_pname in props:
+            row["stato"] = _read_prop_value(props[status_pname])
+        if prio_pname and prio_pname in props:
+            row["priorità"] = _read_prop_value(props[prio_pname])
+        if date_pname and date_pname in props:
+            row["scadenza"] = _read_prop_value(props[date_pname])
+        out.append(row)
+    return json.dumps(out, ensure_ascii=False)
 
 
 def search(query: str) -> str:
@@ -237,6 +311,34 @@ DEFINITIONS = [
         },
     },
     {
+        "name": "notion_query_database",
+        "description": (
+            "Interroga un database Notion filtrando per scadenza (Due Date) e/o stato. "
+            "Usalo quando l'utente chiede le sue task/attività per una certa data ('cosa devo "
+            "fare domani', 'task di questa settimana', 'scadenze in arrivo'). Per un singolo "
+            "giorno passa lo stesso valore in due_after e due_before. Di default esclude le "
+            "voci già completate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "database": {
+                    "type": "string",
+                    "description": "Nome del database: Tasks, Projects, Resources, ecc.",
+                },
+                "due_after": {"type": "string", "description": "Scadenza minima YYYY-MM-DD (opzionale)"},
+                "due_before": {"type": "string", "description": "Scadenza massima YYYY-MM-DD (opzionale)"},
+                "status": {"type": "string", "description": "Filtra per uno stato specifico (opzionale)"},
+                "exclude_completed": {
+                    "type": "boolean",
+                    "description": "Se true (default) esclude le voci completate",
+                },
+                "limit": {"type": "integer", "description": "Numero massimo di risultati (default 25)"},
+            },
+            "required": ["database"],
+        },
+    },
+    {
         "name": "notion_search",
         "description": (
             "Cerca pagine e database su Notion per titolo/contenuto. Usalo per trovare "
@@ -262,6 +364,7 @@ DEFINITIONS = [
 HANDLERS = {
     "notion_list_databases": list_databases,
     "notion_create_entry": create_entry,
+    "notion_query_database": query_database,
     "notion_search": search,
     "notion_read_page": read_page,
 }
