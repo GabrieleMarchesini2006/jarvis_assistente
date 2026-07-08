@@ -1,4 +1,6 @@
 """Client minimale per la Bot API di Telegram (solo requests, nessuna libreria pesante)."""
+import time
+
 import requests
 
 import config
@@ -9,23 +11,37 @@ FILE_BASE = f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}"
 # Telegram accetta messaggi fino a 4096 caratteri.
 MAX_MESSAGE_LEN = 4096
 
+# Il proxy del piano free di PythonAnywhere ogni tanto restituisce 503: riproviamo.
+MAX_RETRIES = 4
+
+
+def _post(endpoint: str, payload: dict, timeout: int = 30):
+    """POST con qualche tentativo, per resistere ai 503 temporanei del proxy."""
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = requests.post(f"{API_BASE}/{endpoint}", json=payload, timeout=timeout)
+            if resp.ok:
+                return resp
+            # 429/5xx: aspetta e riprova; 4xx client-side: inutile insistere.
+            if resp.status_code < 500 and resp.status_code != 429:
+                return resp
+        except requests.RequestException as exc:
+            last_exc = exc
+        time.sleep(1.5 * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    return resp
+
 
 def send_message(chat_id: int, text: str) -> None:
     """Invia un messaggio, spezzandolo se supera il limite di Telegram."""
     for start in range(0, len(text), MAX_MESSAGE_LEN):
         chunk = text[start:start + MAX_MESSAGE_LEN]
-        resp = requests.post(
-            f"{API_BASE}/sendMessage",
-            json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
-            timeout=30,
-        )
-        if not resp.ok:
+        resp = _post("sendMessage", {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"})
+        if resp is None or not resp.ok:
             # Il Markdown malformato fa fallire l'invio: riprova come testo semplice.
-            requests.post(
-                f"{API_BASE}/sendMessage",
-                json={"chat_id": chat_id, "text": chunk},
-                timeout=30,
-            )
+            _post("sendMessage", {"chat_id": chat_id, "text": chunk})
 
 
 def send_chat_action(chat_id: int, action: str = "typing") -> None:
@@ -36,7 +52,7 @@ def send_chat_action(chat_id: int, action: str = "typing") -> None:
             timeout=10,
         )
     except requests.RequestException:
-        pass  # azione puramente cosmetica
+        pass  # azione puramente cosmetica (nessun retry: non è importante)
 
 
 def download_file(file_id: str, dest_path: str) -> str:
