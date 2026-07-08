@@ -10,12 +10,18 @@ import re
 from google import genai
 from google.genai import types
 
+from google.genai import errors as genai_errors
+
 import config
 from bot import telegram_api
 
-# Per il digest usiamo flash (migliore con la ricerca web); gira 1 volta al
-# giorno, quindi consuma pochissime richieste.
-NEWS_MODEL = "gemini-2.5-flash"
+
+class NewsUnavailable(Exception):
+    """Impossibile recuperare le notizie (quota esaurita o servizio non disponibile)."""
+
+
+# Proviamo prima flash-lite (limite gratuito alto), poi flash come riserva.
+NEWS_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
 PROMPT = (
     "Cerca sul web le notizie più importanti e recenti delle ultime 24-48 ore "
@@ -36,15 +42,21 @@ def _markdown_to_html(text: str) -> str:
     return text
 
 
+def _generate_with_search():
+    """Chiama Gemini con la ricerca web, provando i modelli in ordine."""
+    last_exc = None
+    cfg = types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
+    for model in NEWS_MODELS:
+        try:
+            return client.models.generate_content(model=model, contents=PROMPT, config=cfg)
+        except genai_errors.APIError as exc:
+            last_exc = exc  # 429 (quota) o 503 (sovraccarico): prova il prossimo modello
+    raise NewsUnavailable(str(last_exc))
+
+
 def build_digest() -> str:
     """Genera il digest HTML (testo + fonti) pronto da inviare su Telegram."""
-    resp = client.models.generate_content(
-        model=NEWS_MODEL,
-        contents=PROMPT,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-        ),
-    )
+    resp = _generate_with_search()
     testo = (resp.text or "").strip()
 
     # Raccoglie le fonti dai metadati di grounding (link reali usati da Gemini).
@@ -71,9 +83,16 @@ def build_digest() -> str:
 def send_daily_news(chat_id: int) -> None:
     try:
         message = build_digest()
-    except Exception as exc:
+    except NewsUnavailable:
         telegram_api.send_message(
-            chat_id, f"Non sono riuscito a preparare le notizie di oggi ({exc})."
+            chat_id,
+            "☀️ Buongiorno! Oggi non riesco a recuperare le notizie "
+            "(quota giornaliera di Gemini esaurita). Riprovo domani.",
+        )
+        return
+    except Exception:
+        telegram_api.send_message(
+            chat_id, "☀️ Buongiorno! Oggi non riesco a recuperare le notizie, riprovo domani."
         )
         return
     telegram_api.send_html(chat_id, message)

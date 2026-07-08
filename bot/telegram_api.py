@@ -44,10 +44,23 @@ def send_message(chat_id: int, text: str) -> None:
             _post("sendMessage", {"chat_id": chat_id, "text": chunk})
 
 
+def _split_on_lines(text: str, limit: int) -> list:
+    """Spezza il testo in blocchi <= limit senza mai tagliare a metà una riga
+    (così non si spezza un tag HTML come <a>...</a>)."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit and current:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def send_html(chat_id: int, html: str) -> None:
     """Invia un messaggio in formato HTML (per link cliccabili affidabili)."""
-    for start in range(0, len(html), MAX_MESSAGE_LEN):
-        chunk = html[start:start + MAX_MESSAGE_LEN]
+    for chunk in _split_on_lines(html, MAX_MESSAGE_LEN):
         _post("sendMessage", {
             "chat_id": chat_id,
             "text": chunk,
