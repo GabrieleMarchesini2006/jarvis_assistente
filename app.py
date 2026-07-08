@@ -93,7 +93,15 @@ def _handle_message(chat_id: int, message: dict) -> None:
         return
 
     telegram_api.send_chat_action(chat_id, "typing")
-    reply = agent.run_agent(chat_id, text)
+    try:
+        reply = agent.run_agent(chat_id, text)
+    except agent.QuotaExhausted:
+        telegram_api.send_message(
+            chat_id,
+            "⚠️ Ho esaurito la quota gratuita giornaliera di Gemini. "
+            "Riprova più tardi (si azzera a mezzanotte, ora del Pacifico).",
+        )
+        return
     telegram_api.send_message(chat_id, reply)
 
 

@@ -3,15 +3,41 @@
 Loop agentico manuale: Gemini decide quali tool chiamare, noi li eseguiamo
 e gli rimandiamo i risultati finché non produce la risposta finale.
 """
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 import config
 from bot import history
 from bot.tools import TOOL_DEFINITIONS, execute_tool
+
+
+class QuotaExhausted(Exception):
+    """Quota giornaliera gratuita di Gemini esaurita."""
+
+
+def _generate(contents):
+    """Chiama Gemini gestendo i 429: riprova quelli al minuto, segnala quelli giornalieri."""
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(
+                model=config.GEMINI_MODEL, contents=contents, config=GENERATION_CONFIG
+            )
+        except genai_errors.ClientError as exc:
+            if getattr(exc, "code", None) != 429:
+                raise
+            msg = str(exc)
+            if "PerDay" in msg or "per day" in msg.lower():
+                raise QuotaExhausted() from exc
+            # Limite al minuto: aspetta un attimo e riprova.
+            if attempt < 2:
+                time.sleep(3 * (attempt + 1))
+            else:
+                raise QuotaExhausted() from exc
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
@@ -81,11 +107,7 @@ def run_agent(chat_id: int, user_text: str) -> str:
 
     response = None
     for _ in range(MAX_AGENT_ITERATIONS):
-        response = client.models.generate_content(
-            model=config.GEMINI_MODEL,
-            contents=contents,
-            config=GENERATION_CONFIG,
-        )
+        response = _generate(contents)
 
         candidate = response.candidates[0]
         parts = candidate.content.parts or []

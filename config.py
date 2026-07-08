@@ -16,7 +16,8 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "cambiami")
 
 # --- Gemini (il "cervello" dell'agente, gratis via Google AI Studio) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# flash-lite ha un limite gratuito molto più alto di flash (ideale per il bot).
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 # --- Notion ---
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
