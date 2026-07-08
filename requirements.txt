@@ -1,0 +1,10 @@
+flask
+requests
+python-dotenv
+google-genai
+notion-client
+google-api-python-client
+google-auth
+google-auth-oauthlib
+SpeechRecognition
+pydub
