@@ -1,0 +1,32 @@
+name: Revisione settimanale
+
+# Domenica sera: task in ritardo e in arrivo dei prossimi 7 giorni.
+# 18:00 UTC domenica = 20:00 in Italia (ora legale) / 19:00 (ora solare).
+on:
+  schedule:
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Installa dipendenze
+        run: pip install google-genai requests python-dotenv google-api-python-client google-auth notion-client tzdata
+      - name: Ricostruisci token.json Google
+        run: printf '%s' "$GOOGLE_TOKEN_JSON" > token.json
+        env:
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+      - name: Invia la revisione
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ALLOWED_USER_ID: ${{ secrets.ALLOWED_USER_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          TIMEZONE: Europe/Rome
+        run: python weekly_review.py

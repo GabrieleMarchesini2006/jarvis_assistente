@@ -122,30 +122,22 @@ def list_databases() -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
-def create_entry(database: str, title: str, status: str = "", priority: str = "",
-                 due_date: str = "", description: str = "", url: str = "") -> str:
-    """Aggiunge una riga a un database PARA (Tasks, Projects, Resources, ...)."""
-    dbs = _discover_databases()
-    db = dbs.get(database.strip().lower())
-    if db is None:
-        disponibili = ", ".join(d["name"] for d in dbs.values())
-        return f"Database '{database}' non trovato. Disponibili: {disponibili}"
-
-    properties = {
-        db["title_prop"]: {"title": [{"type": "text", "text": {"content": title}}]}
-    }
+def _field_properties(db: dict, status: str, priority: str, due_date: str,
+                      description: str, url: str, default_status: str = "") -> tuple:
+    """Costruisce le properties Notion per i campi comuni. Ritorna (properties, avvisi)."""
+    properties = {}
     avvisi = []
     find_prop = lambda names, types: _find_prop_name(db, names, types)
 
-    # Stato: se non specificato, per i database che ce l'hanno prova "Next Action".
     status_pname, status_meta = find_prop({"status"}, {"status", "select"})
     if status_pname:
-        wanted = status or "Next Action"
-        match = _match_option(wanted, status_meta.get("options", []))
-        if match:
-            properties[status_pname] = {status_meta["type"]: {"name": match}}
-        elif status:
-            avvisi.append(f"stato '{status}' non valido (opzioni: {status_meta.get('options')})")
+        wanted = status or default_status
+        if wanted:
+            match = _match_option(wanted, status_meta.get("options", []))
+            if match:
+                properties[status_pname] = {status_meta["type"]: {"name": match}}
+            elif status:
+                avvisi.append(f"stato '{status}' non valido (opzioni: {status_meta.get('options')})")
     elif status:
         avvisi.append("questo database non ha un campo Stato")
 
@@ -175,11 +167,59 @@ def create_entry(database: str, title: str, status: str = "", priority: str = ""
         if pname:
             properties[pname] = {"url": url}
 
+    return properties, avvisi
+
+
+def _db_by_data_source(ds_id: str):
+    for db in _discover_databases().values():
+        if db["data_source_id"] == ds_id:
+            return db
+    return None
+
+
+def create_entry(database: str, title: str, status: str = "", priority: str = "",
+                 due_date: str = "", description: str = "", url: str = "") -> str:
+    """Aggiunge una riga a un database PARA (Tasks, Projects, Resources, ...)."""
+    dbs = _discover_databases()
+    db = dbs.get(database.strip().lower())
+    if db is None:
+        disponibili = ", ".join(d["name"] for d in dbs.values())
+        return f"Database '{database}' non trovato. Disponibili: {disponibili}"
+
+    properties, avvisi = _field_properties(
+        db, status, priority, due_date, description, url, default_status="Next Action"
+    )
+    properties[db["title_prop"]] = {"title": [{"type": "text", "text": {"content": title}}]}
+
     page = _client().pages.create(
         parent={"type": "data_source_id", "data_source_id": db["data_source_id"]},
         properties=properties,
     )
     msg = f"Aggiunto '{title}' al database {db['name']} di Notion: {page.get('url')}"
+    if avvisi:
+        msg += " (nota: " + "; ".join(avvisi) + ")"
+    return msg
+
+
+def update_entry(page_id: str, status: str = "", priority: str = "",
+                 due_date: str = "", description: str = "", title: str = "") -> str:
+    """Aggiorna una riga esistente di un database (es. segna una task completata)."""
+    n = _client()
+    page = n.pages.retrieve(page_id=page_id)
+    parent = page.get("parent", {})
+    ds_id = parent.get("data_source_id") or parent.get("database_id")
+    db = _db_by_data_source(ds_id) if ds_id else None
+    if db is None:
+        return "Non riesco a identificare il database di questa riga."
+
+    properties, avvisi = _field_properties(db, status, priority, due_date, description, "")
+    if title:
+        properties[db["title_prop"]] = {"title": [{"type": "text", "text": {"content": title}}]}
+    if not properties:
+        return "Nessuna modifica da applicare."
+
+    n.pages.update(page_id=page_id, properties=properties)
+    msg = "Riga aggiornata."
     if avvisi:
         msg += " (nota: " + "; ".join(avvisi) + ")"
     return msg
@@ -229,7 +269,8 @@ def query_database(database: str, due_before: str = "", due_after: str = "",
     out = []
     for p in results:
         props = p.get("properties", {})
-        row = {"titolo": _read_prop_value(props.get(db["title_prop"], {"type": "title", "title": []}))}
+        row = {"id": p["id"],
+               "titolo": _read_prop_value(props.get(db["title_prop"], {"type": "title", "title": []}))}
         if status_pname and status_pname in props:
             row["stato"] = _read_prop_value(props[status_pname])
         if prio_pname and prio_pname in props:
@@ -311,6 +352,27 @@ DEFINITIONS = [
         },
     },
     {
+        "name": "notion_update_entry",
+        "description": (
+            "Aggiorna una riga esistente di un database Notion (usa l'id ottenuto da "
+            "notion_query_database). Serve per segnare una task come completata "
+            "(status 'Completed'), cambiare priorità, spostare la scadenza o rinominarla. "
+            "Passa solo i campi da cambiare."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Id della riga (da notion_query_database)"},
+                "status": {"type": "string", "description": "Nuovo stato (es. Completed)"},
+                "priority": {"type": "string", "description": "Nuova priorità"},
+                "due_date": {"type": "string", "description": "Nuova scadenza YYYY-MM-DD"},
+                "description": {"type": "string", "description": "Nuova descrizione"},
+                "title": {"type": "string", "description": "Nuovo titolo"},
+            },
+            "required": ["page_id"],
+        },
+    },
+    {
         "name": "notion_query_database",
         "description": (
             "Interroga un database Notion filtrando per scadenza (Due Date) e/o stato. "
@@ -364,6 +426,7 @@ DEFINITIONS = [
 HANDLERS = {
     "notion_list_databases": list_databases,
     "notion_create_entry": create_entry,
+    "notion_update_entry": update_entry,
     "notion_query_database": query_database,
     "notion_search": search,
     "notion_read_page": read_page,

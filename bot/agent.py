@@ -2,6 +2,7 @@
 
 Loop agentico manuale: Gemini decide quali tool chiamare, noi li eseguiamo
 e gli rimandiamo i risultati finché non produce la risposta finale.
+Supporta input di testo, immagini (foto) e memoria a lungo termine.
 """
 import time
 from datetime import datetime
@@ -12,51 +13,31 @@ from google.genai import types
 from google.genai import errors as genai_errors
 
 import config
-from bot import history
+from bot import history, memory
 from bot.tools import TOOL_DEFINITIONS, execute_tool
-
-
-class QuotaExhausted(Exception):
-    """Quota giornaliera gratuita di Gemini esaurita."""
-
-
-def _generate(contents):
-    """Chiama Gemini gestendo i 429: riprova quelli al minuto, segnala quelli giornalieri."""
-    for attempt in range(3):
-        try:
-            return client.models.generate_content(
-                model=config.GEMINI_MODEL, contents=contents, config=GENERATION_CONFIG
-            )
-        except genai_errors.ClientError as exc:
-            if getattr(exc, "code", None) != 429:
-                raise
-            msg = str(exc)
-            if "PerDay" in msg or "per day" in msg.lower():
-                raise QuotaExhausted() from exc
-            # Limite al minuto: aspetta un attimo e riprova.
-            if attempt < 2:
-                time.sleep(3 * (attempt + 1))
-            else:
-                raise QuotaExhausted() from exc
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 MAX_AGENT_ITERATIONS = 15
+# Prova prima il modello configurato, poi gli altri come riserva (contro i 429/503).
+MODEL_CHAIN = [config.GEMINI_MODEL, "gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
-SYSTEM_PROMPT = """Sei Jarvis, l'assistente personale di Gabriele su Telegram. Rispondi sempre in italiano, in modo diretto e conciso (i messaggi arrivano su Telegram: niente muri di testo).
+BASE_SYSTEM_PROMPT = """Sei Jarvis, l'assistente personale di Gabriele su Telegram. Rispondi sempre in italiano, in modo diretto e conciso (i messaggi arrivano su Telegram: niente muri di testo).
 
 Hai accesso a questi strumenti dell'utente:
-- Google Calendar: leggere, creare ed eliminare eventi.
+- Google Calendar: leggere, creare, modificare ed eliminare eventi.
 - Gmail: cercare, leggere e inviare email.
-- Notion: cercare e leggere pagine, e aggiungere righe ai suoi database (sistema PARA: Tasks, Projects, Areas, Resources, Archive).
+- Notion: cercare e leggere pagine, aggiungere e aggiornare righe nei suoi database (sistema PARA: Tasks, Projects, Areas, Resources, Archive).
+- Memoria: puoi ricordare fatti duraturi sull'utente tra una conversazione e l'altra.
 
 Linee guida:
 - Usa gli strumenti quando servono, senza chiedere permesso per le operazioni di sola lettura.
-- Per azioni difficili da annullare (inviare email, eliminare eventi) chiedi conferma prima, a meno che l'utente non l'abbia già chiesta esplicitamente in modo completo.
-- DOPO ogni azione (creazione evento, invio email, salvataggio su Notion) rispondi SEMPRE con un breve messaggio di conferma all'utente, riepilogando cosa hai fatto. Non restare mai in silenzio dopo aver usato un tool.
+- Per inviare un'email o eliminare un evento usa direttamente il tool: mostrerà all'utente dei bottoni di conferma, non serve che chiedi tu a parole.
+- DOPO ogni azione (creazione/modifica evento, salvataggio su Notion) rispondi SEMPRE con un breve messaggio di conferma, riepilogando cosa hai fatto. Non restare mai in silenzio dopo aver usato un tool.
 - Per salvare qualcosa su Notion usa notion_create_entry aggiungendo una riga al database giusto (Tasks per compiti/promemoria, Projects per progetti, Resources per link e articoli). Non creare mai pagine sciolte. Se non sei sicuro dei valori di stato/priorità disponibili, controlla prima con notion_list_databases.
-- Quando l'utente chiede le sue task o attività per una data (es. "cosa devo fare domani", "task di questa settimana"), usa notion_query_database sul database Tasks filtrando per scadenza (Due Date). Per un singolo giorno metti la stessa data in due_after e due_before.
+- Quando l'utente chiede le sue task o attività per una data, usa notion_query_database sul database Tasks filtrando per scadenza (Due Date). Per un singolo giorno metti la stessa data in due_after e due_before. Le righe restituite includono un id: usalo con notion_update_entry per segnare una task come completata o cambiarne stato/priorità/scadenza.
 - Se crei una task senza che l'utente specifichi lo stato, lascia il valore predefinito (il tool imposta "Next Action").
+- Quando impari qualcosa di duraturo e utile sull'utente (preferenze, persone ricorrenti, abitudini, dati fissi), salvalo con memory_save. Non salvare cose banali o temporanee.
 - Quando l'utente usa date relative ("domani", "venerdì prossimo"), calcolale a partire dalla data corrente indicata nel messaggio.
 - Se un tool restituisce un errore, spiega il problema in modo semplice.
 - Formatta le risposte per Telegram: elenchi puntati, grassetto con *asterischi*, niente tabelle."""
@@ -72,10 +53,43 @@ GEMINI_TOOLS = types.Tool(function_declarations=[
     for t in TOOL_DEFINITIONS
 ])
 
-GENERATION_CONFIG = types.GenerateContentConfig(
-    system_instruction=SYSTEM_PROMPT,
-    tools=[GEMINI_TOOLS],
-)
+
+class QuotaExhausted(Exception):
+    """Quota giornaliera gratuita di Gemini esaurita su tutti i modelli."""
+
+
+def _system_prompt() -> str:
+    """Prompt di sistema con la memoria a lungo termine dell'utente."""
+    facts = memory.format_facts()
+    if facts:
+        return BASE_SYSTEM_PROMPT + "\n\nCosa sai sull'utente (memoria):\n" + facts
+    return BASE_SYSTEM_PROMPT
+
+
+def _generate(contents):
+    """Chiama Gemini provando i modelli in catena e gestendo i 429."""
+    quota_hit = False
+    for model in dict.fromkeys(MODEL_CHAIN):  # ordine preservato, senza duplicati
+        cfg = types.GenerateContentConfig(
+            system_instruction=_system_prompt(), tools=[GEMINI_TOOLS]
+        )
+        for attempt in range(2):
+            try:
+                return client.models.generate_content(model=model, contents=contents, config=cfg)
+            except genai_errors.ClientError as exc:
+                if getattr(exc, "code", None) != 429:
+                    raise
+                quota_hit = True
+                msg = str(exc)
+                if "PerDay" in msg or "per day" in msg.lower():
+                    break  # quota giornaliera del modello finita: passa al prossimo modello
+                if attempt == 0:
+                    time.sleep(3)  # limite al minuto: aspetta e riprova
+            except genai_errors.ServerError:
+                break  # 503/500: prova il prossimo modello
+    if quota_hit:
+        raise QuotaExhausted()
+    raise RuntimeError("Nessun modello Gemini disponibile.")
 
 
 def _now_line() -> str:
@@ -97,13 +111,19 @@ def _history_to_contents(chat_id: int) -> list:
     return contents
 
 
-def run_agent(chat_id: int, user_text: str) -> str:
-    """Processa un messaggio dell'utente e restituisce la risposta finale."""
+def run_agent(chat_id: int, user_text: str, media_parts=None) -> str:
+    """Processa un messaggio dell'utente (testo + eventuali immagini) e risponde.
+
+    media_parts: lista opzionale di types.Part (es. immagini) da allegare al messaggio.
+    """
+    context = {"chat_id": chat_id}
     user_content = f"{_now_line()}\n{user_text}"
+    parts = [types.Part.from_text(text=user_content)]
+    if media_parts:
+        parts.extend(media_parts)
+
     contents = _history_to_contents(chat_id)
-    contents.append(
-        types.Content(role="user", parts=[types.Part.from_text(text=user_content)])
-    )
+    contents.append(types.Content(role="user", parts=parts))
 
     response = None
     for _ in range(MAX_AGENT_ITERATIONS):
@@ -120,7 +140,7 @@ def run_agent(chat_id: int, user_text: str) -> str:
         result_parts = []
         for call in function_calls:
             try:
-                output = execute_tool(call.name, dict(call.args or {}))
+                output = execute_tool(call.name, dict(call.args or {}), context)
             except Exception as exc:  # l'errore torna a Gemini, che lo spiega all'utente
                 output = f"Errore durante l'esecuzione: {exc}"
             result_parts.append(
@@ -133,5 +153,5 @@ def run_agent(chat_id: int, user_text: str) -> str:
     final_parts = response.candidates[0].content.parts or []
     final_text = "".join(p.text for p in final_parts if p.text).strip() or "Fatto."
 
-    history.append(chat_id, user_text, final_text)
+    history.append(chat_id, user_text or "[media]", final_text)
     return final_text

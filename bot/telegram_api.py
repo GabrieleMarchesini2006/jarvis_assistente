@@ -69,6 +69,46 @@ def send_html(chat_id: int, html: str) -> None:
         })
 
 
+def send_confirmation(chat_id: int, text: str, token: str) -> None:
+    """Invia un messaggio con due bottoni: conferma / annulla."""
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ Conferma", "callback_data": f"ok:{token}"},
+            {"text": "❌ Annulla", "callback_data": f"no:{token}"},
+        ]]
+    }
+    _post("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": keyboard,
+    })
+
+
+def answer_callback(callback_query_id: str, text: str = "") -> None:
+    try:
+        requests.post(
+            f"{API_BASE}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+    except requests.RequestException:
+        pass
+
+
+def edit_message_reply_markup(chat_id: int, message_id: int) -> None:
+    """Rimuove i bottoni da un messaggio (dopo che è stato gestito)."""
+    try:
+        requests.post(
+            f"{API_BASE}/editMessageReplyMarkup",
+            json={"chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []}},
+            timeout=10,
+        )
+    except requests.RequestException:
+        pass
+
+
 def send_chat_action(chat_id: int, action: str = "typing") -> None:
     try:
         requests.post(
@@ -80,14 +120,12 @@ def send_chat_action(chat_id: int, action: str = "typing") -> None:
         pass  # azione puramente cosmetica (nessun retry: non è importante)
 
 
-def download_file(file_id: str, dest_path: str) -> str:
-    """Scarica un file di Telegram (es. un vocale) e lo salva su dest_path."""
+def download_bytes(file_id: str) -> bytes:
+    """Scarica un file di Telegram (vocale, foto) e ne restituisce i byte."""
     info = requests.get(
         f"{API_BASE}/getFile", params={"file_id": file_id}, timeout=30
     ).json()
     file_path = info["result"]["file_path"]
     data = requests.get(f"{FILE_BASE}/{file_path}", timeout=60)
     data.raise_for_status()
-    with open(dest_path, "wb") as f:
-        f.write(data.content)
-    return dest_path
+    return data.content

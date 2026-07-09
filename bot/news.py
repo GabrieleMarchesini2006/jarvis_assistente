@@ -54,12 +54,12 @@ def _generate_with_search():
     raise NewsUnavailable(str(last_exc))
 
 
-def build_digest() -> str:
-    """Genera il digest HTML (testo + fonti) pronto da inviare su Telegram."""
+def news_section_html() -> str:
+    """Genera solo il corpo delle notizie (testo + fonti), senza intestazione.
+    Riutilizzabile dentro il briefing mattutino."""
     resp = _generate_with_search()
     testo = (resp.text or "").strip()
 
-    # Raccoglie le fonti dai metadati di grounding (link reali usati da Gemini).
     fonti = []
     visti = set()
     cand = resp.candidates[0] if resp.candidates else None
@@ -68,16 +68,19 @@ def build_digest() -> str:
         for ch in gm.grounding_chunks:
             if ch.web and ch.web.uri and ch.web.uri not in visti:
                 visti.add(ch.web.uri)
-                titolo = ch.web.title or ch.web.uri
-                fonti.append((titolo, ch.web.uri))
+                fonti.append((ch.web.title or ch.web.uri, ch.web.uri))
 
-    parti = ["☀️ <b>Buongiorno! Novità di oggi su AI e produttività</b>\n",
-             _markdown_to_html(html_lib.escape(testo))]
+    parti = [_markdown_to_html(html_lib.escape(testo))]
     if fonti:
         parti.append("\n\n📎 <b>Fonti:</b>")
         for titolo, uri in fonti[:10]:
             parti.append(f'\n• <a href="{html_lib.escape(uri)}">{html_lib.escape(titolo)}</a>')
     return "".join(parti)
+
+
+def build_digest() -> str:
+    """Genera il digest HTML (testo + fonti) pronto da inviare su Telegram."""
+    return "🗞 <b>Novità di oggi su AI e produttività</b>\n" + news_section_html()
 
 
 def send_daily_news(chat_id: int) -> None:

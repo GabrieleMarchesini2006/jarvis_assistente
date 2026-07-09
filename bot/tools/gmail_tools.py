@@ -70,15 +70,32 @@ def read_email(message_id: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def send_email(to: str, subject: str, body: str) -> str:
+def send_email(context: dict, to: str, subject: str, body: str) -> str:
+    """Chiede conferma con i bottoni prima di inviare l'email (azione irreversibile)."""
+    from bot import pending, telegram_api
+    import html as html_lib
+    chat_id = context.get("chat_id")
+    if not chat_id:
+        return do_send_email(to, subject, body)
+    token = pending.save({"type": "send_email", "to": to, "subject": subject, "body": body})
+    anteprima = (
+        f"📧 Vuoi inviare questa email?\n\n"
+        f"<b>A:</b> {html_lib.escape(to)}\n"
+        f"<b>Oggetto:</b> {html_lib.escape(subject)}\n\n"
+        f"{html_lib.escape(body)}"
+    )
+    telegram_api.send_confirmation(chat_id, anteprima, token)
+    return "Ho mostrato la bozza all'utente con i bottoni di conferma. Attendo la sua decisione, non fare altro."
+
+
+def do_send_email(to: str, subject: str, body: str) -> str:
+    """Invio reale dell'email (chiamato dopo la conferma dai bottoni)."""
     mime = MIMEText(body, "plain", "utf-8")
     mime["to"] = to
     mime["subject"] = subject
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
-    sent = _service().users().messages().send(
-        userId="me", body={"raw": raw}
-    ).execute()
-    return f"Email inviata a {to} (id: {sent.get('id')})."
+    _service().users().messages().send(userId="me", body={"raw": raw}).execute()
+    return f"Email inviata a {to}."
 
 
 DEFINITIONS = [
@@ -112,9 +129,9 @@ DEFINITIONS = [
     {
         "name": "gmail_send_email",
         "description": (
-            "Invia una email dall'account Gmail dell'utente. Prima di inviare, mostra sempre "
-            "all'utente la bozza (destinatario, oggetto, testo) e chiedi conferma, a meno che "
-            "l'utente non abbia già dettato esplicitamente tutto il contenuto e chiesto di inviare."
+            "Prepara una email dall'account Gmail dell'utente. Il tool mostra automaticamente "
+            "la bozza con i bottoni di conferma, quindi puoi chiamarlo direttamente con "
+            "destinatario, oggetto e testo completi: sarà l'utente a confermare o annullare."
         ),
         "input_schema": {
             "type": "object",
